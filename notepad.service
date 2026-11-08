@@ -1,0 +1,25 @@
+[Unit]
+Description=Notepad shared notepad
+After=network.target
+
+[Service]
+Type=simple
+User=notepad
+Group=notepad
+WorkingDirectory=/opt/notepad
+ExecStart=/usr/bin/python3 /opt/notepad/server.py
+Environment=DATA_DIR=/var/lib/notepad
+Environment=HOST=0.0.0.0
+Environment=PORT=8080
+EnvironmentFile=-/etc/notepad.env
+Restart=on-failure
+RestartSec=3
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/notepad
+
+[Install]
+WantedBy=multi-user.target
