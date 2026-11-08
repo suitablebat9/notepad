@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Notepad: dependency-free shared notes for a single Linux service."""
 import argparse, getpass, hashlib, hmac, json, os, secrets, sqlite3, threading, time
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -12,11 +13,16 @@ SESSIONS = {}
 ATTEMPTS = {}
 LOCK = threading.RLock()
 
+@contextmanager
 def db():
     c = sqlite3.connect(DATA / 'notes.db', timeout=10)
     c.row_factory = sqlite3.Row
-    c.execute('PRAGMA foreign_keys=ON')
-    return c
+    try:
+        c.execute('PRAGMA foreign_keys=ON')
+        with c:
+            yield c
+    finally:
+        c.close()
 
 def password_hash(value, salt=None):
     salt = salt or secrets.token_hex(16)
@@ -34,6 +40,9 @@ def init():
         CREATE TABLE IF NOT EXISTS channels(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,password TEXT,version INTEGER NOT NULL DEFAULT 1);
         CREATE TABLE IF NOT EXISTS notes(id TEXT PRIMARY KEY,channel TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,title TEXT NOT NULL,body TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,updated REAL NOT NULL);
         ''')
+        for table in ('channels', 'notes'):
+            if 'owner' not in {r['name'] for r in c.execute(f'PRAGMA table_info({table})')}:
+                c.execute(f'ALTER TABLE {table} ADD COLUMN owner TEXT')
         if not c.execute('SELECT 1 FROM channels').fetchone():
             c.execute('INSERT INTO channels(id,name) VALUES (?,?)', ('general','general'))
 
@@ -47,7 +56,9 @@ class Handler(BaseHTTPRequestHandler):
         raw = json.dumps(data).encode() if mime == 'application/json' else data
         self.send_response(status)
         for key, val in {'Content-Type':mime,'Content-Length':str(len(raw)), 'Cache-Control':'no-store', 'X-Content-Type-Options':'nosniff','Referrer-Policy':'same-origin','Content-Security-Policy':"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"}.items(): self.send_header(key,val)
-        if cookie: self.send_header('Set-Cookie',cookie)
+        if cookie:
+            for value in ([cookie] if isinstance(cookie,str) else cookie):
+                self.send_header('Set-Cookie',value)
         self.end_headers()
         self.wfile.write(raw)
     def session(self):
@@ -70,14 +81,31 @@ class Handler(BaseHTTPRequestHandler):
             ATTEMPTS[key]=tries+[now]
     def new_session(self, admin=False, grants=None):
         token=secrets.token_urlsafe(32)
+        cookies=SimpleCookie()
+        try: cookies.load(self.headers.get('Cookie',''))
+        except Exception: pass
+        owner=cookies.get('notepad_owner')
+        owner=owner.value if owner else ''
+        if len(owner)!=64 or any(ch not in '0123456789abcdef' for ch in owner):
+            owner=secrets.token_hex(32)
+        owner_id=hashlib.sha256(owner.encode()).hexdigest()
         with LOCK:
             for k in list(SESSIONS):
                 if SESSIONS[k]['expires'] < time.time(): del SESSIONS[k]
-            SESSIONS[token]={'admin':admin,'grants':grants or {},'csrf':secrets.token_urlsafe(32),'expires':time.time()+43200}
+            SESSIONS[token]={'owner':owner_id,'admin':admin,'grants':grants or {},'csrf':secrets.token_urlsafe(32),'expires':time.time()+43200}
         secure='; Secure' if os.environ.get('COOKIE_SECURE')=='1' else ''
-        self.reply(200, {'ok':True}, cookie=f'session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{secure}')
+        self.reply(200, {'ok':True}, cookie=[f'session={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{secure}',f'notepad_owner={owner}; HttpOnly; SameSite=Strict; Path=/; Max-Age=31536000{secure}'])
     def require_admin(self,s):
         if not s['admin']: raise Error(403,'Administrator access required.')
+    def can_delete(self,s,row):
+        return bool(s['admin'] or (s.get('owner') and row['owner']==s['owner']))
+    def require_delete(self,s,row):
+        if not self.can_delete(s,row): raise Error(403,'Only the creator or an administrator can delete this item.')
+    def note_data(self,s,row):
+        result=dict(row)
+        result.pop('owner',None)
+        result['can_delete']=self.can_delete(s,row)
+        return result
     def access(self,c,s,cid):
         ch=c.execute('SELECT * FROM channels WHERE id=?',(cid,)).fetchone()
         if not ch: raise Error(404,'Channel not found.')
@@ -139,13 +167,13 @@ class Handler(BaseHTTPRequestHandler):
             if path=='/api/channels':
                 if method=='GET':
                     rows=c.execute('SELECT c.*, (SELECT count(*) FROM notes n WHERE n.channel=c.id) AS count FROM channels c ORDER BY name').fetchall()
-                    return self.reply(200,[{'id':r['id'],'name':r['name'],'locked':bool(r['password']),'accessible':not r['password'] or s['admin'] or s['grants'].get(r['id'])==r['version'],'count':r['count'],'version':r['version']} for r in rows])
+                    return self.reply(200,[{'id':r['id'],'name':r['name'],'locked':bool(r['password']),'accessible':not r['password'] or s['admin'] or s['grants'].get(r['id'])==r['version'],'count':r['count'],'version':r['version'],'can_delete':self.can_delete(s,r)} for r in rows])
                 if method=='POST':
                     name=self.string(d,'name',60).strip()
                     if not name: raise Error(400,'Enter a channel name.')
                     password=self.string(d,'password',1024,'')
                     cid=secrets.token_hex(12)
-                    c.execute('INSERT INTO channels(id,name,password) VALUES (?,?,?)',(cid,name,password_hash(password) if password else None))
+                    c.execute('INSERT INTO channels(id,name,password,owner) VALUES (?,?,?,?)',(cid,name,password_hash(password) if password else None,s['owner']))
                     s['grants'][cid]=1
                     return self.reply(201,{'id':cid})
             p=path.strip('/').split('/')
@@ -160,9 +188,11 @@ class Handler(BaseHTTPRequestHandler):
                     return self.reply(200,{'ok':True})
                 ch=self.access(c,s,cid)
                 if len(p)==3 and method in ('DELETE','PUT'):
-                    self.require_admin(s)
-                    if method=='DELETE': c.execute('DELETE FROM channels WHERE id=?',(cid,))
+                    if method=='DELETE':
+                        self.require_delete(s,ch)
+                        c.execute('DELETE FROM channels WHERE id=?',(cid,))
                     else:
+                        self.require_admin(s)
                         name=self.string(d,'name',60).strip()
                         if not name: raise Error(400,'Enter a channel name.')
                         if 'password' in d:
@@ -171,17 +201,17 @@ class Handler(BaseHTTPRequestHandler):
                         else: c.execute('UPDATE channels SET name=? WHERE id=?',(name,cid))
                     return self.reply(200,{'ok':True})
                 if len(p)==4 and p[3]=='notes':
-                    if method=='GET': return self.reply(200,[dict(r) for r in c.execute('SELECT * FROM notes WHERE channel=? ORDER BY updated DESC',(cid,))])
+                    if method=='GET': return self.reply(200,[self.note_data(s,r) for r in c.execute('SELECT * FROM notes WHERE channel=? ORDER BY updated DESC',(cid,))])
                     if method=='POST':
                         nid=secrets.token_hex(12)
-                        c.execute('INSERT INTO notes(id,channel,title,body,updated) VALUES (?,?,?,?,?)',(nid,cid,self.string(d,'title',120,'Untitled note'),self.string(d,'body',1000000,''),time.time()))
+                        c.execute('INSERT INTO notes(id,channel,title,body,updated,owner) VALUES (?,?,?,?,?,?)',(nid,cid,self.string(d,'title',120,'Untitled note'),self.string(d,'body',1000000,''),time.time(),s['owner']))
                         return self.reply(201,{'id':nid})
             if len(p)==3 and p[1]=='notes':
                 note=c.execute('SELECT * FROM notes WHERE id=?',(p[2],)).fetchone()
                 if not note: raise Error(404,'Note not found.')
                 self.access(c,s,note['channel'])
                 if method=='DELETE':
-                    self.require_admin(s)
+                    self.require_delete(s,note)
                     c.execute('DELETE FROM notes WHERE id=?',(note['id'],))
                     return self.reply(200,{'ok':True})
                 if method=='PUT':
@@ -189,7 +219,7 @@ class Handler(BaseHTTPRequestHandler):
                     body=self.string(d,'body',1000000)
                     cur=c.execute('UPDATE notes SET title=?,body=?,version=version+1,updated=? WHERE id=? AND version=?',(title,body,time.time(),note['id'],d.get('version')))
                     if cur.rowcount!=1: raise Error(409,'This note changed on another device. Copy your draft, then reload the latest version.')
-                    return self.reply(200,dict(c.execute('SELECT * FROM notes WHERE id=?',(note['id'],)).fetchone()))
+                    return self.reply(200,self.note_data(s,c.execute('SELECT * FROM notes WHERE id=?',(note['id'],)).fetchone()))
             raise Error(404,'Not found.')
 
 if __name__=='__main__':

@@ -31,7 +31,7 @@ The installer creates a dedicated service user, stores the app at `/opt/notepad`
 
 ## Access model
 
-Anyone who can reach the site can create channels and read/edit notes in open channels. Protected channels require their password. Only admins can delete notes or change/delete channel settings. Channel names and note counts are visible to all visitors. Channel passwords restrict access; they do not encrypt notes from the administrator. Notes are stored as plain text in SQLite; passwords use salted scrypt hashes.
+Anyone who can reach the site can create channels and read/edit notes in open channels. Protected channels require their password. Creators can delete their own notes and channels; deleting a channel also deletes every note inside it. Admins can delete everything and change channel settings. Creator ownership uses a persistent browser cookie, so use the same browser and site address. Clearing cookies, switching devices, or expiration of the cookie loses creator access; admins can still delete the items. Items created before this update have no recorded creator and remain admin-only for deletion. Channel names and note counts are visible to all visitors. Channel passwords restrict access; they do not encrypt notes from the administrator. Notes are stored as plain text in SQLite; passwords use salted scrypt hashes.
 
 Use the container address on your private network, or a private VPN for remote access. For an internet-facing deployment, place an HTTPS reverse proxy with access controls and request limits in front of the app. The bundled Python server is intended for a small personal/private installation.
 

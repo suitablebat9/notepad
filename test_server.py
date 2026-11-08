@@ -35,7 +35,7 @@ class AppTest(unittest.TestCase):
         self.assertEqual(b('/channels/'+cid+'/notes')[1][0]['body'],'from device one')
         self.assertEqual(b('/notes/'+nid,'PUT',{'title':'Test','body':'from device two','version':1})[0],200)
         self.assertEqual(a('/notes/'+nid,'PUT',{'title':'Test','body':'stale','version':1})[0],409)
-        self.assertEqual(a('/notes/'+nid,'DELETE',{})[0],403)
+        self.assertEqual(b('/notes/'+nid,'DELETE',{})[0],403)
         self.assertEqual(admin('/login','POST',{'password':'test-admin-password'})[0],200);tc[0]=admin('/session')[1]['csrf']
         self.assertEqual(admin('/channels/'+cid+'/notes')[1][0]['body'],'from device two')
         self.assertEqual(admin('/notes/'+nid,'PUT',{'title':'Admin edit','body':'admin body','version':2})[0],200)
@@ -44,6 +44,44 @@ class AppTest(unittest.TestCase):
         self.assertEqual(admin('/notes/'+nid,'DELETE',{})[0],200)
         self.assertEqual(admin('/channels/'+cid,'DELETE',{})[0],200)
         self.assertEqual(admin('/channels/'+cid+'/notes')[0],404)
+    def test_creator_deletion(self):
+        a,ta=self.client();b,tb=self.client()
+        cid=a('/channels','POST',{'name':'Owned'})[1]['id']
+        nid=a('/channels/'+cid+'/notes','POST',{})[1]['id']
+        other=b('/channels/'+cid+'/notes','POST',{})[1]['id']
+        self.assertTrue(next(c for c in a('/channels')[1] if c['id']==cid)['can_delete'])
+        self.assertFalse(next(c for c in b('/channels')[1] if c['id']==cid)['can_delete'])
+        rows=a('/channels/'+cid+'/notes')[1]
+        self.assertTrue(next(n for n in rows if n['id']==nid)['can_delete'])
+        self.assertNotIn('owner',rows[0])
+        self.assertEqual(b('/channels/'+cid,'DELETE',{})[0],403)
+        self.assertEqual(b('/notes/'+nid,'DELETE',{})[0],403)
+        self.assertEqual(a('/notes/'+other,'DELETE',{})[0],403)
+        self.assertEqual(a('/channels/'+cid,'PUT',{'name':'Renamed'})[0],403)
+        # Ownership persists across admin sign-in/out and server session loss.
+        self.assertEqual(a('/login','POST',{'password':'test-admin-password'})[0],200)
+        ta[0]=a('/session')[1]['csrf']
+        self.assertEqual(a('/logout','POST',{})[0],200)
+        ta[0]=a('/session')[1]['csrf']
+        with self.app.LOCK:self.app.SESSIONS.clear()
+        a('/session');ta[0]=a('/session')[1]['csrf']
+        self.assertEqual(a('/notes/'+nid,'DELETE',{})[0],200)
+        self.assertEqual(a('/channels/'+cid,'DELETE',{})[0],200)
+        with self.app.db() as c:
+            self.assertIsNone(c.execute('SELECT 1 FROM notes WHERE id=?',(other,)).fetchone())
+        self.assertEqual(a('/channels/general','DELETE',{})[0],403)
+    def test_legacy_schema_migration(self):
+        old_data=self.app.DATA
+        with tempfile.TemporaryDirectory() as folder:
+            try:
+                self.app.DATA=Path(folder)
+                with self.app.db() as c:
+                    c.executescript("CREATE TABLE channels(id TEXT PRIMARY KEY,name TEXT NOT NULL UNIQUE,password TEXT,version INTEGER NOT NULL DEFAULT 1); CREATE TABLE notes(id TEXT PRIMARY KEY,channel TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,version INTEGER NOT NULL DEFAULT 1,updated REAL NOT NULL); INSERT INTO channels(id,name) VALUES ('legacy','Legacy'); INSERT INTO notes VALUES ('old','legacy','Old note','Keep me',1,0);")
+                self.app.init();self.app.init()
+                with self.app.db() as c:
+                    row=c.execute("SELECT * FROM notes WHERE id='old'").fetchone()
+                    self.assertEqual(row['body'],'Keep me');self.assertIsNone(row['owner'])
+            finally:self.app.DATA=old_data
     def test_tunnel_origin(self):
         a,t=self.client()
         headers={'Host':'notes.example.com','Origin':'https://notes.example.com'}
