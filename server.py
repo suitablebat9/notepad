@@ -109,10 +109,13 @@ class Handler(BaseHTTPRequestHandler):
         s=self.session()
         d={}
         if method!='GET':
-            # Require same-origin JSON requests; never trust forwarded headers.
+            # TLS may terminate at a tunnel; match the public Host for HTTP or HTTPS.
+            # PUBLIC_ORIGIN pins the exact origin when a proxy overrides Host.
             origin=self.headers.get('Origin')
-            allowed=os.environ.get('PUBLIC_ORIGIN')
-            if origin and origin != (allowed or 'http://'+self.headers.get('Host','')): raise Error(403,'Origin not allowed.')
+            configured=os.environ.get('PUBLIC_ORIGIN', '').strip().rstrip('/')
+            host=self.headers.get('Host','')
+            allowed={configured} if configured else {'http://'+host, 'https://'+host}
+            if origin and origin not in allowed: raise Error(403,'Origin not allowed. Set PUBLIC_ORIGIN to your public website address if your proxy changes the Host header.')
             if self.headers.get('Content-Type','').split(';')[0]!='application/json': raise Error(415,'JSON required.')
             n=int(self.headers.get('Content-Length','0'))
             if n<0 or n>1100000: raise Error(413,'Request too large.')
@@ -141,7 +144,6 @@ class Handler(BaseHTTPRequestHandler):
                     name=self.string(d,'name',60).strip()
                     if not name: raise Error(400,'Enter a channel name.')
                     password=self.string(d,'password',1024,'')
-                    if password and len(password)<8: raise Error(400,'Use at least 8 characters for a channel password.')
                     cid=secrets.token_hex(12)
                     c.execute('INSERT INTO channels(id,name,password) VALUES (?,?,?)',(cid,name,password_hash(password) if password else None))
                     s['grants'][cid]=1
@@ -165,7 +167,6 @@ class Handler(BaseHTTPRequestHandler):
                         if not name: raise Error(400,'Enter a channel name.')
                         if 'password' in d:
                             pw=self.string(d,'password',1024)
-                            if pw and len(pw)<8: raise Error(400,'Use at least 8 characters.')
                             c.execute('UPDATE channels SET name=?,password=?,version=version+1 WHERE id=?',(name,password_hash(pw) if pw else None,cid))
                         else: c.execute('UPDATE channels SET name=? WHERE id=?',(name,cid))
                     return self.reply(200,{'ok':True})

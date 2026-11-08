@@ -16,8 +16,8 @@ class AppTest(unittest.TestCase):
     def client(self):
         op=urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
         token=['']
-        def req(path,method='GET',body=None):
-            r=urllib.request.Request(self.url+'/api'+path,method=method,data=None if body is None else json.dumps(body).encode(),headers={'Content-Type':'application/json','X-CSRF-Token':token[0]})
+        def req(path,method='GET',body=None,headers=None):
+            r=urllib.request.Request(self.url+'/api'+path,method=method,data=None if body is None else json.dumps(body).encode(),headers={'Content-Type':'application/json','X-CSRF-Token':token[0],**(headers or {})})
             try:
                 with op.open(r) as response:return response.status,json.load(response)
             except urllib.error.HTTPError as e:
@@ -26,12 +26,12 @@ class AppTest(unittest.TestCase):
         return req,token
     def test_full_flow(self):
         a,ta=self.client();b,tb=self.client();admin,tc=self.client()
-        status,ch=a('/channels','POST',{'name':'Private','password':'secret-pass'});self.assertEqual(status,201);cid=ch['id']
+        status,ch=a('/channels','POST',{'name':'Private','password':'x'});self.assertEqual(status,201);cid=ch['id']
         status,n=a('/channels/'+cid+'/notes','POST',{'title':'Test','body':'from device one'});self.assertEqual(status,201);nid=n['id']
         self.assertEqual(b('/channels/'+cid+'/notes')[0],403)
         self.assertEqual(b('/notes/'+nid,'PUT',{'title':'hack','body':'x','version':1})[0],403)
         self.assertEqual(b('/channels/'+cid+'/unlock','POST',{'password':'wrong'})[0],401)
-        self.assertEqual(b('/channels/'+cid+'/unlock','POST',{'password':'secret-pass'})[0],200)
+        self.assertEqual(b('/channels/'+cid+'/unlock','POST',{'password':'x'})[0],200)
         self.assertEqual(b('/channels/'+cid+'/notes')[1][0]['body'],'from device one')
         self.assertEqual(b('/notes/'+nid,'PUT',{'title':'Test','body':'from device two','version':1})[0],200)
         self.assertEqual(a('/notes/'+nid,'PUT',{'title':'Test','body':'stale','version':1})[0],409)
@@ -39,11 +39,25 @@ class AppTest(unittest.TestCase):
         self.assertEqual(admin('/login','POST',{'password':'test-admin-password'})[0],200);tc[0]=admin('/session')[1]['csrf']
         self.assertEqual(admin('/channels/'+cid+'/notes')[1][0]['body'],'from device two')
         self.assertEqual(admin('/notes/'+nid,'PUT',{'title':'Admin edit','body':'admin body','version':2})[0],200)
-        self.assertEqual(admin('/channels/'+cid,'PUT',{'name':'Private','password':'changed-pass'})[0],200)
+        self.assertEqual(admin('/channels/'+cid,'PUT',{'name':'Private','password':'y'})[0],200)
         self.assertEqual(b('/channels/'+cid+'/notes')[0],403)
         self.assertEqual(admin('/notes/'+nid,'DELETE',{})[0],200)
         self.assertEqual(admin('/channels/'+cid,'DELETE',{})[0],200)
         self.assertEqual(admin('/channels/'+cid+'/notes')[0],404)
+    def test_tunnel_origin(self):
+        a,t=self.client()
+        headers={'Host':'notes.example.com','Origin':'https://notes.example.com'}
+        status,ch=a('/channels','POST',{'name':'Tunnel'},headers)
+        self.assertEqual(status,201)
+        self.assertEqual(a('/channels/'+ch['id']+'/notes','POST',{'body':'via tunnel'},headers)[0],201)
+        self.assertEqual(a('/channels','POST',{'name':'Cross origin'},{**headers,'Origin':'https://evil.example'})[0],403)
+        self.assertEqual(a('/channels','POST',{'name':'Null origin'},{**headers,'Origin':'null'})[0],403)
+        os.environ['PUBLIC_ORIGIN']='https://public.example.com/'
+        try:
+            self.assertEqual(a('/channels','POST',{'name':'Pinned origin'},{'Host':'localhost:8080','Origin':'https://public.example.com'})[0],201)
+            self.assertEqual(a('/channels','POST',{'name':'Wrong origin'},headers)[0],403)
+        finally:
+            os.environ.pop('PUBLIC_ORIGIN',None)
     def test_csrf_and_persistence(self):
         a,t=self.client();old=t[0];t[0]='bad'
         self.assertEqual(a('/channels','POST',{'name':'blocked'})[0],403);t[0]=old

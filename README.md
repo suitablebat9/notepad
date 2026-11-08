@@ -7,7 +7,7 @@ A simple dark-mode notepad for your Proxmox Linux container. Python 3.11+ and SQ
 - Create channels and multiple plain-text notes per channel.
 - Paste or edit on one device; see saved changes on another within about three seconds.
 - Autosave after a short typing pause.
-- Optionally password-protect a channel.
+- Optionally password-protect a channel. Channel passwords have no minimum length; leave blank for an open channel.
 - Admin sign-in can read, edit, and delete every note, including protected notes. Admins can rename/delete channels and change/remove channel passwords.
 - Conflicting edits are rejected, with your unsaved draft left in the editor. Copy the draft before selecting “Reload latest.”
 
@@ -35,9 +35,9 @@ Anyone who can reach the site can create channels and read/edit notes in open ch
 
 Use the container address on your private network, or a private VPN for remote access. For an internet-facing deployment, place an HTTPS reverse proxy with access controls and request limits in front of the app. The bundled Python server is intended for a small personal/private installation.
 
-## HTTPS reverse proxy
+## Cloudflare Tunnel / HTTPS reverse proxy
 
-If you already use an HTTPS reverse proxy, forward it to container port 8080 and create `/etc/notepad.env` with your exact external origin (no trailing slash):
+HTTP and HTTPS requests matching the public Host header work automatically, including TLS terminated by Cloudflare Tunnel. Forward the tunnel to container port 8080. If you configured a Host header override, or want to pin the public address, create `/etc/notepad.env` with your exact external origin (no trailing slash):
 
 ```ini
 PUBLIC_ORIGIN=https://notes.example.com
@@ -71,7 +71,14 @@ systemctl start notepad
 
 To restore, stop the service, restore the contents of that backup into `/var/lib/notepad`, run `chown -R notepad:notepad /var/lib/notepad`, then start the service. Backups contain all notes and password hashes, so keep them private. Use a fresh backup destination for each backup.
 
-To update the app, rerun the installer from the new package; it preserves the database and existing admin password.
+To update the installed app, download and run the current installer. Your notes and admin password are preserved:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/suitablebat9/notepad/main/install.sh -o /tmp/install-notepad.sh
+sh /tmp/install-notepad.sh
+```
+
+Refresh the website after updating. If you still get “Origin not allowed,” set `PUBLIC_ORIGIN` in `/etc/notepad.env` to the actual address you open in your browser and restart `notepad`. Replace any old example value rather than adding a duplicate.
 
 ## Run without installing a service
 
